@@ -14,7 +14,7 @@ st.markdown("---")
 st.sidebar.header("📋 Gelişmiş Kullanıcı Veri Girişi")
 
 # ---------------------------------------------------------
-# 1. ISINMA VE ENERJİ MODÜLÜ (Geliştirildi)
+# 1. ISINMA VE ENERJİ MODÜLÜ
 # ---------------------------------------------------------
 st.sidebar.subheader("1. Isınma ve Enerji")
 elektrik_kwh = st.sidebar.number_input(
@@ -46,7 +46,6 @@ gun_isi_destegi = st.sidebar.checkbox(
     "Sıcak Su İçin Güneş Enerjisi (Gün Isı) Kullanıyor musunuz?", value=True
 )
 
-# Isınma Katsayıları ve Yalıtım Çarpanı
 if isinma_turu == "Kömür":
     Yk = 160
 elif isinma_turu == "Doğalgaz":
@@ -150,30 +149,50 @@ if plastik_ayristirma:
     r += 0.15
 
 # ---------------------------------------------------------
-# FORMÜLİZASYON
+# 5. BESLENME VE YEREL EKOSİSTEM MODÜLÜ (YENİ EKLEME)
 # ---------------------------------------------------------
-# Isınma Modülü Formülü (Yalıtım ve Gün Isı Entegre Edildi)
-I_z = (
-    ((elektrik_kwh * 0.4) + (klima_kullanimi * 12) + Yk) * yalitim_carpani
-) - gun_isi_indirim
-
-# Tarım Modülü Formülü
-T_w = max(
-    10,
-    (gubre_torba * 35)
-    + (pestisit_kullanimi * 15)
-    + zuruf_skoru
-    - (bahce_donum * 5),
+st.sidebar.subheader("5. Beslenme ve Yerel Ekosistem")
+kirmizi_et = st.sidebar.selectbox(
+    "Haftalık Kırmızı Et Tüketimi (Öğün):",
+    options=["0 Öğün", "1-2 Öğün", "3-5 Öğün", "5+ Öğün"],
+    index=1,
+)
+yerel_gida_orani = st.sidebar.select_slider(
+    "Eynesil Pazarı / Yerel Üretici Alışveriş Oranı:",
+    options=["%0", "%25", "%50", "%75", "%100"],
+    value="%50",
+)
+tekne_yakit_litre = st.sidebar.number_input(
+    "Balıkçı Teknesi Haftalık Yakıt Tüketimi (Litre - Yoksa 0):",
+    min_value=0,
+    value=0,
+    step=5,
 )
 
-# Ulaşım Modülü Formülü
+# Beslenme ve Balıkçılık Skoru Hesaplama
+if kirmizi_et == "0 Öğün":
+    et_skoru = 0
+elif kirmizi_et == "1-2 Öğün":
+    et_skoru = 25
+elif kirmizi_et == "3-5 Öğün":
+    et_skoru = 60
+else:
+    et_skoru = 100
+
+gida_indirim_oranlari = {"%0": 0, "%25": 10, "%50": 25, "%75": 40, "%100": 60}
+gida_indirimi = gida_indirim_oranlari[yerel_gida_orani]
+
+# ---------------------------------------------------------
+# FORMÜLİZASYON (5 MODÜLLÜ DENGELİ MİMARİ)
+# ---------------------------------------------------------
+I_z = (((elektrik_kwh * 0.4) + (klima_kullanimi * 12) + Yk) * yalitim_carpani) - gun_isi_indirim
+T_w = max(10, (gubre_torba * 35) + (pestisit_kullanimi * 15) + zuruf_skoru - (bahce_donum * 5))
 U_y = (ozel_arac_km * Fyakit * 4) + (dolmus_sikligi * 2.5)
-
-# Plastik Modülü Formülü
 P_x = ((poset_adedi * 0.15) + (sise_ambalaj_adedi * 0.35)) * (1 - r)
+B_g = max(0, et_skoru + (tekne_yakit_litre * 1.8) - gida_indirimi)
 
-# Yeniden Dengelenmiş Ağırlıklı Ana Fonksiyon
-karbon_skoru = (0.35 * I_z) + (0.25 * T_w) + (0.25 * U_y) + (0.15 * P_x)
+# Yeniden Dengelenmiş 5 Modüllü Ağırlıklı Ana Fonksiyon
+karbon_skoru = (0.28 * I_z) + (0.22 * T_w) + (0.22 * U_y) + (0.14 * P_x) + (0.14 * B_g)
 
 # ---------------------------------------------------------
 # ARAYÜZ VE GÖRSELLEŞTİRME
@@ -186,9 +205,9 @@ with col1:
         value=f"{round(karbon_skoru, 2)} Puan",
     )
 
-    if karbon_skoru < 70:
+    if karbon_skoru < 65:
         st.success("🟢 **Sınıflandırma:** Düşük Risk (Yeşil)")
-    elif 70 <= karbon_skoru <= 140:
+    elif 65 <= karbon_skoru <= 130:
         st.warning("🟡 **Sınıflandırma:** Orta Risk (Sarı)")
     else:
         st.error("🔴 **Sınıflandırma:** Kritik Risk (Kırmızı)")
@@ -197,12 +216,19 @@ with col2:
     st.subheader("🔍 Modül Bazlı Emisyon Katkı Dağılımı")
     modul_df = pd.DataFrame(
         {
-            "Modül": ["Isınma/Enerji", "Tarım/Ekosistem", "Ulaşım", "Plastik/Atık"],
+            "Modül": [
+                "Isınma/Enerji",
+                "Tarım/Ekosistem",
+                "Ulaşım",
+                "Plastik/Atık",
+                "Beslenme/Ekosistem",
+            ],
             "Katkı Skoru (Puan)": [
-                round(0.35 * I_z, 2),
-                round(0.25 * T_w, 2),
-                round(0.25 * U_y, 2),
-                round(0.15 * P_x, 2),
+                round(0.28 * I_z, 2),
+                round(0.22 * T_w, 2),
+                round(0.22 * U_y, 2),
+                round(0.14 * P_x, 2),
+                round(0.14 * B_g, 2),
             ],
         }
     )
@@ -216,7 +242,7 @@ senaryolar = []
 # Isınma Senaryoları
 if yalitim_durumu == "Yalıtım Yok (Yüksek Isı Kaybı)":
     senaryolar.append(
-        "🏠 **Isı Yalıtımı Senaryosu:** Binanızda mantolama/yalıtım bulunmaması ısınma emisyonunuzu %30 artırıyor. Dış cephe mantolaması yapılması durumunda ısınma skorunuz doğrudan düşecektir."
+        "🏠 **Isı Yalıtımı Senaryosu:** Binanızda mantolama bulunmaması ısınma emisyonunuzu %30 artırıyor. Yalıtım yapılması durumunda ısınma skorunuz doğrudan düşecektir."
     )
 
 if isinma_turu == "Kömür":
@@ -233,6 +259,22 @@ if not gun_isi_destegi:
 if zuruf_yonetimi == "Bahçede Yakıyorum (Yüksek Emisyon)":
     senaryolar.append(
         "⚠️ **Tarım Uyarı Senaryosu:** Fındık zürufunu yakmak atmosfere doğrudan CO2 salar. Yakmak yerine **kompostlaştırarak doğal gübre** yaparsanız skorda yüksek miktarda karbon yutağı indirimi kazanırsınız."
+    )
+
+# Beslenme ve Yerel Ekosistem Senaryoları
+if kirmizi_et in ["3-5 Öğün", "5+ Öğün"]:
+    senaryolar.append(
+        "🥩 **Beslenme Senaryosu:** Kırmızı et tüketimi metan ve karbon yükü açısından yüksektir. Haftalık 1-2 öğün yerel balık veya sebze ağırlıklı beslenmeyle karbon yükünüzü düşürebilirsiniz."
+    )
+
+if yerel_gida_orani in ["%0", "%25"]:
+    senaryolar.append(
+        "🛒 **Yerel Gıda Senaryosu:** Mutfak alışverişinizde **Eynesil ilçe pazarını ve yerel üreticileri** tercih etmek gıda lojistiği kaynaklı karbon yükünüzü (Food Miles) düşürecektir."
+    )
+
+if tekne_yakit_litre > 30:
+    senaryolar.append(
+        "⚓ **Balıkçılık Senaryosu:** Tekne yakıt tüketiminiz yüksek. Motor bakımlarını düzenli yaptırmak ve verimli seyir hızını korumak yakıt emisyonunuzu azaltacaktır."
     )
 
 # Ulaşım Senaryoları
@@ -252,4 +294,4 @@ if senaryolar:
         st.info(s)
 else:
     st.balloons()
-    st.success("🎉 Tüketim ve tarım alışkanlıklarınız Eynesil iklim hedefleri ile tam uyumludur.")
+    st.success("🎉 Tüketim, tarım ve yaşam alışkanlıklarınız Eynesil iklim hedefleri ile tam uyumludur.")
