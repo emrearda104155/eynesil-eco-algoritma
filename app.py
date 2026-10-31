@@ -1,6 +1,6 @@
-"""Eco-Algoritma V7 | Mobile survey, reference and Eynesil-extended comparison.
+"""Eco-Algoritma V11 | Orijinal Eynesil anketiyle ulaşım uyumu.
 Run: pip install streamlit pandas gspread google-auth
-     streamlit run eco_algoritma_v7_saha.py
+     streamlit run eco_algoritma_v10_anket_uyumlu.py
 Optional private Google Sheets: .streamlit/secrets.toml [connections.gsheets] spreadsheet_id = ...
 [connections.gsheets.service_account] ... Google service account JSON fields.
 Only pseudonymous responses are collected after explicit consent. No names/IP requested.
@@ -30,6 +30,25 @@ div[data-testid="stMetric"] {background:#f0f8f1;padding:14px;border-radius:16px}
 ROUTES = {'Eynesil–Giresun': {'km':73.0,'liters_trip':7.0,'range':(6.5,7.5)}, 'Eynesil–Trabzon': {'km':59.0,'liters_trip':5.5,'range':(5.0,6.0)}}
 LOCAL = {'minibus_passengers_low':8, 'minibus_passengers_high':9, 'minibus_passengers_mean':8.5, 'trips_per_route_reported':6, 'yayla_elevation_m_approx':2000, 'yayla_visits_per_month':1, 'yayla_fuel_uplift_reported':0.20}
 F = {"elektrik":0.469,"gaz":2.02633,"komur":2.90495,"Benzin":2.075,"Dizel":2.58354,"LPG":1.55713,"LDPE":2.96508,"PET":3.86390,"beef":99.48}
+# EPA WARM v16 (2023), geri dönüşüm yerine düzenli depolama karşılaştırması.
+# Değerler ABD referans senaryosudur; Türkiye/DOA için ölçülmüş katsayı değildir.
+# 1 ABD short ton = 907.18474 kg. Birimler: MT CO2e / short ton.
+DOA_WARM = {
+    "PET": {"recycling": -1.04, "landfill": 0.02, "default_g": 20.0},
+    "Cam": {"recycling": -0.28, "landfill": 0.02, "default_g": 250.0},
+}
+
+def doa_scenario(pet_count, glass_count, pet_g=20.0, glass_g=250.0, periods_per_year=12):
+    """Ayrı bir geri dönüşüm karşılaştırma senaryosu; ana ayak izinden düşülmez."""
+    if any(x < 0 for x in (pet_count, glass_count, pet_g, glass_g, periods_per_year)):
+        raise ValueError("Negatif miktar olamaz")
+    details = {}
+    for name, count, mass_g in (("PET", pet_count, pet_g), ("Cam", glass_count, glass_g)):
+        annual_kg = count * mass_g / 1000 * periods_per_year
+        avoided = annual_kg / 907.18474 * (DOA_WARM[name]["landfill"] - DOA_WARM[name]["recycling"]) * 1000
+        details[name] = {"annual_kg": annual_kg, "potential_kg_co2e": avoided}
+    return details
+
 STEPS=["Başlangıç","Ev ve enerji","Ulaşım","Tarım ve yerel yaşam","Günlük tüketim","Sonuçlar"]
 if "step" not in st.session_state: st.session_state.step=0
 if "sid" not in st.session_state: st.session_state.sid=str(uuid.uuid4())
@@ -74,6 +93,7 @@ def calculate():
             else:a=None
             add('Özel araç','Ulaşım',a,F[fuel])
         else:missing.append('Özel araç enerji tüketimi')
+    # commute_mode is survey metadata; its trips are included in car_km / bus_trips_week.
     if v.get('farm')=='Evet' and v.get('fert')=='Evet':
         b=v.get('bags');m=v.get('bag_weight');p=v.get('n_percent')
         nitrogen=b*m*p/100 if all(x is not None for x in (b,m,p)) else None
@@ -179,6 +199,10 @@ if s==0:
     st.info('Bu uygulama araştırma prototipidir. Genel ve Eynesil kapsamları karşılaştırılır; hesaplanan değerler tüm karbon ayak iziniz değil, ölçülebilen faaliyetlerin toplamıdır.')
     st.checkbox('Anonim yanıtlarımın bilimsel araştırma için kaydedilmesine izin veriyorum.',key='consent')
     st.caption('İzin vermezseniz soruları yine yanıtlayabilir ve kendi sonucunuzu görebilirsiniz; veriniz araştırma tablosuna gönderilmez.')
+    st.markdown('#### 📋 Orijinal Eynesil anketi — katılımcı bilgileri')
+    select('survey_age','1. Yaş aralığınız', ['Belirtmek istemiyorum','18 yaş altı','18-25','26-40','41-60','61 ve üzeri'])
+    st.number_input('2. Hane halkı sayısı',min_value=1,max_value=30,value=3,step=1,key='survey_household')
+    select('survey_occupation','3. Temel geçim kaynağınız / mesleğiniz',['Belirtmek istemiyorum','Öğrenci','Kamu çalışanı','Özel sektör','Emekli','Çiftçi','Balıkçı','Esnaf','Diğer'])
 elif s==1:
     st.subheader('🏠 Evinizde enerji')
     select('living_area','Genellikle hangi bölgede yaşıyorsunuz?', ['Sahil kesiminde','Sahil ile yüksek kesimler arasında','Yüksek kesimde / köyde'])
@@ -206,14 +230,16 @@ elif s==1:
     if st.session_state.heat=='Elektrik':st.caption('Elektrikli ısıtma evin toplam elektrik tüketimine dâhilse yeniden sayılmayacaktır.')
 elif s==2:
     st.subheader('🚗 Günlük ulaşım')
-    select('car','Özel araç kullanıyor musunuz?',['Hayır','Evet'])
+    st.caption('Orijinal anketin 7–10. soruları korunmuştur. İş/okul ulaşımı haftalık toplam mesafeye dahildir; ikinci kez eklenmez.')
+    select('commute_mode','10. İş veya okula giderken hangi ulaşımı kullanıyorsunuz?', ['Özel araç','Toplu taşıma / dolmuş','Yürüyerek','Bisiklet','Servis','İşe/okula gitmiyorum','Diğer'])
+    select('car','7. Özel araç kullanıyor musunuz?',['Hayır','Evet'])
     if st.session_state.car=='Evet':
-        select('fuel','Aracın yakıtı nedir?',['Benzin','Dizel','LPG','Elektrik','Bilmiyorum'])
+        select('fuel','8. Araç yakıt türü',['Benzin','Dizel','LPG','Elektrik','Bilmiyorum'])
         if st.session_state.fuel in ('Benzin','Dizel','LPG'):
-            select('car_input','Hangisini bilmek daha kolay?',['Haftalık yakıt (litre)','Haftalık yol (km)','Bilmiyorum'])
+            select('car_input','Özel araç kullanımınızı nasıl belirtmek istersiniz?',['Haftalık yol (km)','Haftalık yakıt (litre)','Bilmiyorum'])
             if st.session_state.car_input=='Haftalık yakıt (litre)':num('car_liters','Haftada yaklaşık kaç litre yakıt kullanıyorsunuz?',5)
             elif st.session_state.car_input=='Haftalık yol (km)':
-                num('car_km','Haftada kaç km yol yapıyorsunuz?',10)
+                num('car_km','7. Şahsi aracınızla haftada toplam kaç km yol yapıyorsunuz? (iş/okul ve diğer yolculuklar dahil)',10)
                 num('car_rate','Aracınız 100 km’de kaç litre yakıyor?',0.5)
     st.markdown('#### 🏔️ Köy ve yayla yolları')
     select('road_type','En çok hangi yollarda araç kullanıyorsunuz?',
@@ -227,9 +253,11 @@ elif s==2:
             num('yayla_km_roundtrip','Yaylaya gidiş-dönüş toplam kaç km?',5)
             num('yayla_base_l100','Aracın düz yoldaki tüketimi (L/100 km)',0.5)
             st.selectbox('Ayda kaç kez gidiyorsunuz?',[1,2],key='yayla_visits_month')
-    select('bus','Dolmuş / otobüs kullanıyor musunuz?',['Hayır','Evet'])
+    select('bus','9. Eynesil–Giresun / Eynesil–Trabzon dolmuş veya otobüs kullanıyor musunuz?',['Hayır','Evet'])
+    if st.session_state.commute_mode=='Toplu taşıma / dolmuş':
+        st.caption('İş/okul yolculuklarınızı aşağıdaki haftalık toplu taşıma sefer sayısına dahil edin; ayrıca eklenmeyecektir.')
     if st.session_state.bus=='Evet':
-        select('bus_route','Hangi hattı daha çok kullanıyorsunuz?',['Eynesil–Trabzon','Eynesil–Giresun','Diğer'])
+        select('bus_route','9. Hangi hatta yolculuk yapıyorsunuz?',['Eynesil–Trabzon','Eynesil–Giresun','Diğer'])
         if st.session_state.bus_route in ROUTES:
             select('bus_trip_type','Yolculuğunuz nasıl?',['Gidiş-dönüş','Tek yön'])
             st.number_input('Haftada kaç kez bu yolculuğu yapıyorsunuz?',min_value=0,max_value=21,value=1,step=1,key='bus_trips_week')
@@ -272,6 +300,19 @@ elif s==3:
         if st.session_state.boat_fuel!='Bilmiyorum':num('boat_liters','Haftada ortalama kaç litre yakıt kullanılıyor?',5)
 elif s==4:
     st.subheader('♻️ Günlük alışkanlıklar')
+    select('survey_recycling','6. Kâğıt, cam ve plastikleri geri dönüşüm kutusuna atıyor musunuz?',['Evet','Hayır','Bazen'])
+    st.markdown('#### ♻️ DOA depozito iadesi — isteğe bağlı')
+    select('doa_use','DOA uygulamasıyla depozitolu ambalaj iade ediyor musunuz?',['Hayır','Evet'])
+    if st.session_state.doa_use=='Evet':
+        st.caption('DOA uygulamasındaki aylık iade adetlerinize bakabilirsiniz. Yalnızca gerçekten teslim ettiğiniz ambalajları sayın.')
+        st.number_input('Son bir ayda DOA’ya iade ettiğiniz PET şişe (adet)',min_value=0,max_value=5000,value=0,step=1,key='doa_pet_month')
+        st.number_input('Son bir ayda DOA’ya iade ettiğiniz cam şişe (adet)',min_value=0,max_value=5000,value=0,step=1,key='doa_glass_month')
+        with st.expander('🔬 Şişe ağırlıkları ve yöntem (araştırmacı)'):
+            st.caption('20 g PET ve 250 g cam yalnızca örnek kütle varsayımlarıdır; yerel tartımla güncellenmelidir.')
+            st.number_input('PET şişe başına gram',min_value=1.0,max_value=500.0,value=20.0,step=1.0,key='doa_pet_g')
+            st.number_input('Cam şişe başına gram',min_value=1.0,max_value=3000.0,value=250.0,step=10.0,key='doa_glass_g')
+        st.caption('Geri dönüşüm yararı, EPA WARM v16 ABD senaryosuna göre düzenli depolama ile karşılaştırılır. Türkiye’de gerçekleşen net tasarruf değildir; ana ayak izinden düşülmez.')
+    select('survey_bag_reuse','5. Aldığınız plastik poşetleri yeniden kullanma sıklığınız nedir?',['Her zaman','Çoğu zaman','Bazen','Hiçbir zaman'])
     select('plastic','Plastik poşet veya PET şişe kullanıyor musunuz?',['Hayır','Evet'])
     if st.session_state.plastic=='Evet':
         num('bags_week','Haftada yaklaşık kaç poşet?',1)
@@ -296,6 +337,13 @@ else:
     comparison=compare_models(rows)
     st.metric('Hesaplanabilen yıllık emisyon',f'{total:,.0f} kg CO₂e')
     st.caption('Bu bir **kısmi, varsayımlara dayalı emisyon tahminidir**; hesaplanamayan faaliyetler sıfır sayılmaz. Farklı yaşam döngüsü sınırları içeren bileşenler ayrı yorumlanmalıdır.')
+    if st.session_state.get('doa_use')=='Evet':
+        d=doa_scenario(st.session_state.get('doa_pet_month',0),st.session_state.get('doa_glass_month',0),st.session_state.get('doa_pet_g',20.0),st.session_state.get('doa_glass_g',250.0))
+        saving=sum(item['potential_kg_co2e'] for item in d.values())
+        st.markdown('### ♻️ DOA iade senaryosu — ayrı gösterim')
+        st.metric('Olası yıllık geri dönüşüm avantajı',f'{saving:,.2f} kg CO₂e/yıl')
+        st.caption(f"Yıllık PET: {d['PET']['annual_kg']:.2f} kg · Cam: {d['Cam']['annual_kg']:.2f} kg. Son bir ayın 12 ay boyunca temsilî olduğu varsayılmıştır.")
+        st.info('Bu bir **ABD EPA WARM karşılaştırma senaryosudur**, DOA sisteminin doğrulanmış net karbon tasarrufu değildir. Ambalajların fiilen geri dönüştürülmesi, nakliye ve Türkiye enerji karması sonucu değiştirebilir. Ana karbon toplamından çıkarılmamıştır.')
     st.markdown('### 🌍 Genel referans ve 🌰 Eynesil kapsamı')
     left,right=st.columns(2)
     with left: st.metric('Genel kapsam',f"{comparison['reference']:,.0f} kg CO₂e/yıl")
@@ -354,6 +402,7 @@ else:
         with st.expander(f'ℹ️ Henüz hesaplanamayan alanlar ({len(set(missing))})'):
             for item in dict.fromkeys(missing):st.write('• '+item)
     with st.expander('🔬 Kaynaklar ve hesaplama sınırları'):
+        st.write('DOA iade senaryosu: EPA WARM v16 (Aralık 2023), PET geri dönüşüm -1,04 ve düzenli depolama +0,02; cam geri dönüşüm -0,28 ve düzenli depolama +0,02 MT CO₂e/ABD short ton. 1 short ton=907,18474 kg. ABD referansı; Türkiye için ölçülmüş sonuç değil. https://www.epa.gov/system/files/documents/2023-12/warm_containers_packaging_and_non-durable_goods_materials_v16_dec.pdf ; https://www.epa.gov/system/files/documents/2024-01/warm_management_practices_v16_dec.pdf')
         st.write('Elektrik: Türkiye EVÇED 2023, 0,469 kg CO₂e/kWh. Yakıt: DESNZ 2026 doğrudan yanma referansları. Gübre: IPCC 2019 doğrudan N₂O EF₁=0,010 ve GWP100=273. Plastik: DESNZ 2025 birincil LDPE 2,96508 ve PET 3,86390 kg CO₂e/kg; örnek ağırlıklar kullanıcı tarafından değiştirilebilir. Sığır eti: Poore & Nemecek 2018 / Our World in Data küresel ortalama 99,48 kg CO₂e/kg ürün; yaşam döngüsü kapsamı yakıt faktörlerinden farklıdır. Kompost: IPCC 2006 genel 4 kg CH₄/t ve 0,24 kg N₂O/t yaş malzeme, yalnızca ayrı tahmin. Bu referanslar Eynesil ölçümü değildir. Minibüs: Eynesil–Giresun 73 km ve tahmini 6,5–7,5 L/sefer; Eynesil–Trabzon 59 km ve tahmini 5–6 L/sefer; hesapta sırasıyla 7 ve 5,5 L kullanılır. Ortalama doluluk 8,5 yolcu; hat başına 6 günlük sefer. Bunlar doğrulanmamış yerel saha tahminleridir. Züruf açıkta yakma: IPCC 2019 Vol.4 Tablo 2.5, CH₄=2,7 g/kg ve N₂O=0,07 g/kg gerçekten yanan kuru kalıntı. Kuru madde/yanma oranı yerel veri gerektirir. Kendi bahçesinden üretim sıfır emisyon değildir.')
         if rows:st.dataframe(pd.DataFrame(rows),hide_index=True,use_container_width=True)
     answers={k:v for k,v in st.session_state.items() if k not in ('sid','step','submitted') and not k.startswith('FormSubmitter') and k not in ('scenario_activity','scenario_pct')}
