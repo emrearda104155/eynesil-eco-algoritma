@@ -1,6 +1,6 @@
-"""Eco-Algoritma V5 | Mobile survey, reference and Eynesil-extended comparison.
+"""Eco-Algoritma V7 | Mobile survey, reference and Eynesil-extended comparison.
 Run: pip install streamlit pandas gspread google-auth
-     streamlit run eco_algoritma_v5_karsilastirma.py
+     streamlit run eco_algoritma_v7_saha.py
 Optional private Google Sheets: .streamlit/secrets.toml [connections.gsheets] spreadsheet_id = ...
 [connections.gsheets.service_account] ... Google service account JSON fields.
 Only pseudonymous responses are collected after explicit consent. No names/IP requested.
@@ -26,6 +26,9 @@ div[data-testid="stMetric"] {background:#f0f8f1;padding:14px;border-radius:16px}
 .mini{font-size:.89rem;color:#506358}.pill{display:inline-block;background:#d8eddd;color:#215b33;border-radius:20px;padding:5px 12px;font-weight:600}
 </style>""", unsafe_allow_html=True)
 
+# Kullanıcı beyanı; henüz ölçümle doğrulanmamış saha varsayımları.
+ROUTES = {'Eynesil–Giresun': {'km':73.0,'liters_trip':7.0,'range':(6.5,7.5)}, 'Eynesil–Trabzon': {'km':59.0,'liters_trip':5.5,'range':(5.0,6.0)}}
+LOCAL = {'minibus_passengers_low':8, 'minibus_passengers_high':9, 'minibus_passengers_mean':8.5, 'trips_per_route_reported':6, 'yayla_elevation_m_approx':2000, 'yayla_visits_per_month':1, 'yayla_fuel_uplift_reported':0.20}
 F = {"elektrik":0.469,"gaz":2.02633,"komur":2.90495,"Benzin":2.075,"Dizel":2.58354,"LPG":1.55713,"LDPE":2.96508,"PET":3.86390,"beef":99.48}
 STEPS=["Başlangıç","Ev ve enerji","Ulaşım","Tarım ve yerel yaşam","Günlük tüketim","Sonuçlar"]
 if "step" not in st.session_state: st.session_state.step=0
@@ -76,7 +79,7 @@ def calculate():
         nitrogen=b*m*p/100 if all(x is not None for x in (b,m,p)) else None
         add('Gübre: doğrudan N₂O','Tarım',nitrogen,0.010*(44/28)*273)
         missing.append('Gübrenin dolaylı N₂O ve üretim emisyonları')
-    if v.get('farm')=='Evet' and v.get('zuruf') not in ('Yok','Bilmiyorum',None):missing.append('Fındık zürufu emisyonu')
+    # Züruf yakılmıyorsa açıkta yakma emisyonu hesaplanmaz; diğer işlemler ayrı kapsamdır.
     if v.get('boat')=='Evet':
         fuel=v.get('boat_fuel')
         if fuel in ('Benzin','Dizel'):add('Balıkçı teknesi','Yerel faaliyet',annualize(v.get('boat_liters'),'hafta'),F[fuel])
@@ -87,8 +90,17 @@ def calculate():
             add(label,'Plastik malzeme',count*52*weight/1000 if count is not None and weight is not None else None,ef)
         missing.append('Plastik atıkların toplanması ve bertarafı (malzeme üretimi hesabı dışında)')
     if v.get('bus')=='Evet':
-        km=v.get('bus_km');factor=v.get('bus_factor')
-        add('Toplu taşıma','Ulaşım',km*52 if km is not None and factor is not None and factor>0 else None,factor or 0)
+        km=v.get('bus_km')
+        route=v.get('bus_route')
+        if route in ROUTES and v.get('bus_trips_week') is not None:
+            direction=v.get('bus_trip_type','Gidiş-dönüş')
+            km=ROUTES[route]['km']*v['bus_trips_week']*(2 if direction=='Gidiş-dönüş' else 1)
+        liters_100=(100*ROUTES[route]['liters_trip']/ROUTES[route]['km'] if route in ROUTES else v.get('local_minibus_l100'))
+        occupancy=LOCAL['minibus_passengers_mean']
+        if km is not None and liters_100 is not None and occupancy>0:
+            add('Minibüs (kişi payı)','Ulaşım',km*52*liters_100/(100*occupancy),F['Dizel'])
+        else:
+            missing.append('Minibüs: güzergâh ve yakıt tüketimi verisi gerekli')
     if v.get('food')=='Evet':
         meat=v.get('beef_kg')
         add('Sığır eti (küresel yaşam döngüsü ortalaması)','Beslenme',annualize(meat,'hafta'),F['beef'])
@@ -102,11 +114,29 @@ def calculate():
             missing.append('Kompost tahmini fındık zürufuna özgü değildir; toplamdan ayrı raporlanmalı')
         else:missing.append('Kompost miktarı (ton)')
     if v.get('farm')=='Evet' and v.get('zuruf')=='Yakıyorum':
-        z=v.get('zuruf_burn_kg');ef=v.get('zuruf_burn_ef')
-        if z is not None and ef is not None and ef>0:
-            rows.append({'Faaliyet':'Züruf yakma (kullanıcı faktörü; tahmini)','Modül':'Züruf (tahmini)','kg CO₂e/yıl':round(z*ef,3)})
-        else:missing.append('Züruf yakma: doğrulanmış kg CO₂e/kg faktörü ve miktar gerekli')
+        z=v.get('zuruf_burn_kg')
+        # IPCC 2019 refinement Vol 4 Table 2.5: g/kg of dry matter ACTUALLY burnt.
+        # CH4 2.7 g/kg; N2O 0.07 g/kg. GWP100: CH4 27.2, N2O 273.
+        if z is not None:
+            dry_fraction=v.get('zuruf_dry_fraction')
+            burned_fraction=v.get('zuruf_burned_fraction')
+            if dry_fraction is not None and burned_fraction is not None:
+                dry_burnt=z*dry_fraction/100*burned_fraction/100
+                rows.append({'Faaliyet':'Züruf açıkta yakma (IPCC genel; tahmini)',
+                             'Modül':'Züruf (tahmini)',
+                             'kg CO₂e/yıl':round(dry_burnt*(2.7*27.2+0.07*273)/1000,3)})
+            else:missing.append('Züruf yakma: kuru madde ve yanma oranı bilinmiyor')
+        else:missing.append('Züruf yakma miktarı gerekli')
     if v.get('farm')=='Evet' and v.get('zuruf')=='Bahçede bırakıyorum':missing.append('Bahçede bırakılan zürufun toprak emisyonları (ayrı yöntem gerekli)')
+    # Yayla yolculuğuna ait %20 artış yalnızca AYRI bir temel tüketim tahminiyle
+    # senaryo olarak kullanılabilir; gerçek yakıt tüketimine ikinci kez eklenmez.
+    if v.get('car')=='Evet' and v.get('yayla_frequency')=='Ayda 1–2 kez' and v.get('yayla_km_roundtrip') is not None and v.get('yayla_base_l100') is not None and v.get('fuel') in ('Benzin','Dizel','LPG'):
+        km=v.get('yayla_km_roundtrip');rate=v.get('yayla_base_l100')
+        # Bir aylık ziyaret varsayımı: kullanıcı 1 veya 2 olarak seçer.
+        visits=v.get('yayla_visits_month',1)
+        baseline=km*visits*12*rate/100*F[v.get('fuel')]
+        rows.append({'Faaliyet':'Yayla seyahati (%20 artışlı SENARYO; ana toplam dışı)','Modül':'Yayla (senaryo)','kg CO₂e/yıl':round(baseline*1.20,3)})
+
     return rows,missing
 
 def compare_models(rows):
@@ -190,13 +220,32 @@ elif s==2:
            ['Karışık yollar','Düz / sahil yolları','Yokuşlu köy / yayla yolları','Araç kullanmıyorum'])
     select('yayla_frequency','Köy veya yaylaya araçla ne sıklıkla gidiyorsunuz?',
            ['Ayda 1–2 kez','Hiç','Yılda birkaç kez','Haftada en az bir kez'])
-    st.caption('Yokuşlar yakıt tüketimini etkileyebilir. Ancak gerçek tüketiminizi biliyorsanız bu etki zaten tüketiminizde bulunur; ek bir yokuş katsayısı uygulanmaz.')
+    st.caption('Yerel saha beyanı: yaylalar yaklaşık 2.000 m; ortalama ayda 1 ziyaret; yokuşta yaklaşık %20 fazla yakıt. Bu %20 doğrulanmış katsayı değil, isteğe bağlı senaryodur. Gerçek yakıt tüketimine ayrıca eklenmez.')
+    if st.session_state.get('car')=='Evet' and st.session_state.get('yayla_frequency')=='Ayda 1–2 kez':
+        with st.expander('🏔️ İsteğe bağlı yayla yolculuğu senaryosu'):
+            st.caption('Ana karbon toplamından ayrı gösterilir. Yalnızca yayla seyahatine ait düz yol tüketimi tahmini biliniyorsa hesaplanır.')
+            num('yayla_km_roundtrip','Yaylaya gidiş-dönüş toplam kaç km?',5)
+            num('yayla_base_l100','Aracın düz yoldaki tüketimi (L/100 km)',0.5)
+            st.selectbox('Ayda kaç kez gidiyorsunuz?',[1,2],key='yayla_visits_month')
     select('bus','Dolmuş / otobüs kullanıyor musunuz?',['Hayır','Evet'])
     if st.session_state.bus=='Evet':
-        num('bus_km','Haftada yaklaşık kaç km yolculuk yapıyorsunuz?',5)
-        with st.expander('🔬 Toplu taşıma hesaplama ayarı (araştırmacı)'):
-            st.caption('Doğrulanmış yolcu-km faktörünü girin; boşsa hesaplama yapılmaz. Dolmuş doluluk oranı sonucu etkiler.')
-            num('bus_factor','kg CO₂e / yolcu-km',0.01)
+        select('bus_route','Hangi hattı daha çok kullanıyorsunuz?',['Eynesil–Trabzon','Eynesil–Giresun','Diğer'])
+        if st.session_state.bus_route in ROUTES:
+            select('bus_trip_type','Yolculuğunuz nasıl?',['Gidiş-dönüş','Tek yön'])
+            st.number_input('Haftada kaç kez bu yolculuğu yapıyorsunuz?',min_value=0,max_value=21,value=1,step=1,key='bus_trips_week')
+            route_km=ROUTES[st.session_state.bus_route]['km']
+            multiplier=2 if st.session_state.bus_trip_type=='Gidiş-dönüş' else 1
+            st.caption(f'Haftalık hesaplanan mesafe: {route_km*st.session_state.bus_trips_week*multiplier:g} km. Gidiş-dönüş seçildiğinde iki yön de hesaplanır.')
+        else:
+            num('bus_km','Haftada yaklaşık kaç km yolculuk yapıyorsunuz? (gidiş-dönüş toplam)',5)
+        st.caption('Saha tahmini: her hatta günde 6 sefer; minibüste ortalama 8,5 yolcu. Hat seçilirse yakıt tüketimi otomatik kullanılır. Haftalık mesafeye sefer sayısı tekrar eklenmez.')
+        if st.session_state.bus_route in ROUTES:
+            r=ROUTES[st.session_state.bus_route]
+            st.info(f"{st.session_state.bus_route}: {r['km']:g} km/tek yön, {2*r['km']:g} km/gidiş-dönüş. Tahmini {r['liters_trip']:g} L motorin/tek yön. 8,5 yolcu varsayımı.")
+        else:
+            with st.expander('🔬 Diğer hat için araştırmacı yakıt verisi'):
+                num('local_minibus_l100','Minibüs tüketimi (L/100 km)',1)
+                st.caption('Doğrulanmış değer yoksa boş bırakın; tahmin yapılmaz.')
 elif s==3:
     st.subheader('🌰 Tarım ve yerel yaşam')
     select('farm','Fındık veya çay tarımıyla ilgileniyor musunuz?',['Hayır','Evet'])
@@ -212,10 +261,11 @@ elif s==3:
                 num('zuruf_ton','Yılda yaklaşık kaç ton yaş züruf kompostluyorsunuz?',0.1)
                 st.caption('Genel IPCC kompost emisyon faktörleriyle yaklaşık hesaplanır; fındık zürufuna özgü değildir.')
         if st.session_state.zuruf=='Yakıyorum':
-            with st.expander('🔬 Yakma hesabı (araştırmacı)'):
-                num('zuruf_burn_kg','Yılda kaç kg züruf yakılıyor?',10)
-                num('zuruf_burn_ef','Kaynaklı emisyon faktörü (kg CO₂e/kg)',0.01)
-                st.caption('Faktör doğrulanmadıkça emisyon toplamına eklenmez.')
+            num('zuruf_burn_kg','Yılda yaklaşık kaç kg züruf yakıyorsunuz? (yaş tartım)',10)
+            with st.expander('🔬 Züruf yakma varsayımları (araştırmacı)'):
+                st.caption('IPCC tarımsal kalıntı genel faktörleri. Zürufa özgü ölçüm değildir. Kuru madde ve gerçekten yanan oranı doğrulanmadan tahmin üretmeyiz.')
+                num('zuruf_dry_fraction','Kuru madde oranı (%)',5)
+                num('zuruf_burned_fraction','Kuru maddenin gerçekten yanan oranı (%)',5)
     select('boat','Balıkçı teknesinin yakıtını siz mi karşılıyorsunuz?',['Hayır','Evet'])
     if st.session_state.boat=='Evet':
         select('boat_fuel','Teknenin yakıtı nedir?',['Dizel','Benzin','Bilmiyorum'])
@@ -230,14 +280,19 @@ elif s==4:
             st.caption('Poşet ve şişe ağırlıkları kişiden kişiye değişir. Aşağıdaki değerler yalnızca örnek varsayımlardır.')
             st.number_input('Bir poşet kaç gram?',min_value=0.1,value=5.0,step=0.5,key='bag_g')
             st.number_input('Bir boş PET şişe gövdesi kaç gram?',min_value=0.1,value=20.0,step=1.0,key='bottle_g')
+    select('garden_food','Sebze ve meyvenizin bir bölümünü kendi bahçenizden karşılıyor musunuz?',['Hayır','Evet'])
+    if st.session_state.garden_food=='Evet':
+        st.slider('Tükettiğiniz sebze-meyvenin yaklaşık yüzde kaçı kendi bahçenizden?',0,100,25,5,key='garden_share')
+        st.caption('Bu oran araştırmada kullanılır; bahçe ürünü otomatik sıfır emisyon sayılmaz. Üretim emisyonları ve ulaşım ayrı değerlendirilir.')
+    select('shopping_place','Gıdayı çoğunlukla nereden temin ediyorsunuz?',['Market','Halk pazarı','Her ikisi','Kendi bahçem / üretimim'])
     select('food','Beslenme alışkanlığınızı araştırmada değerlendirmek ister misiniz?',['Hayır','Evet'])
     if st.session_state.food=='Evet':
         st.caption('Sığır eti için haftalık yaklaşık miktar yeterli. Diğer etleri aynı faktörle hesaplamıyoruz.')
         num('beef_kg','Haftada yaklaşık kaç kg sığır eti tüketiyorsunuz?',0.1)
-    st.caption('Plastik malzeme üretimi ve sığır eti için kaynaklı yaklaşık hesaplar yapılır; diğer gıda ve atık işlemleri ayrı gösterilir.')
+    st.caption('Kendi bahçesinden üretim ve pazar/market tercihi, tek başına indirim katsayısı değildir. Gıda üretim miktarı ve ulaşım verisi olmadan hayalî tasarruf hesaplanmaz.')
 else:
     st.subheader('🌱 Karbon özetiniz')
-    rows,missing=calculate();verified=[r for r in rows if '(tahmini)' not in r['Modül']];estimates=[r for r in rows if '(tahmini)' in r['Modül']];total=sum(r['kg CO₂e/yıl'] for r in verified)
+    rows,missing=calculate();verified=[r for r in rows if r['Modül'] not in ('Züruf (tahmini)','Yayla (senaryo)')];estimates=[r for r in rows if '(tahmini)' in r['Modül']];total=sum(r['kg CO₂e/yıl'] for r in verified)
     comparison=compare_models(rows)
     st.metric('Hesaplanabilen yıllık emisyon',f'{total:,.0f} kg CO₂e')
     st.caption('Bu bir **kısmi, varsayımlara dayalı emisyon tahminidir**; hesaplanamayan faaliyetler sıfır sayılmaz. Farklı yaşam döngüsü sınırları içeren bileşenler ayrı yorumlanmalıdır.')
@@ -265,8 +320,12 @@ else:
 
     road=v_road=st.session_state.get('road_type','Karışık yollar')
     yayla=st.session_state.get('yayla_frequency','Ayda 1–2 kez')
-    st.caption(f'🏔️ Yerel ulaşım bilgisi: {road} · Köy/yayla yolculuğu: {yayla}. Doğrulanmamış eğim katsayısı uygulanmaz.')
+    st.caption(f'🏔️ Yerel ulaşım: {road} · Köy/yayla: {yayla}. 2.000 m rakım ve %20 tüketim artışı kullanıcı saha varsayımıdır; ana toplama uygulanmaz.')
     st.caption(f'🌦️ Yaşam bölgesi: {st.session_state.get("living_area","Belirtilmedi")} · Mevsimsel enerji durumu: {st.session_state.get("season_usage","Belirtilmedi")}. Mevsimlik tüketim girildiyse gerçek miktarlar kullanılır; iklim için keyfî çarpan uygulanmaz.')
+    if st.session_state.get('garden_food')=='Evet':
+        st.caption(f"🥬 Sebze-meyvenin kendi bahçesinden karşılanan payı: %{st.session_state.get('garden_share',0)}. Üretim miktarı ve yetiştirme koşulları bilinmediğinden otomatik karbon indirimi yapılmadı.")
+    yayla_scenario=[r for r in rows if r['Modül']=='Yayla (senaryo)']
+    if yayla_scenario:st.info(f'🏔️ Yayla yolculuğu için %20 artışlı varsayımsal senaryo: {yayla_scenario[0]["kg CO₂e/yıl"]:,.1f} kg CO₂e/yıl (ana toplam dışında; gerçek yakıt tüketimiyle çifte sayılmamalı).')
     if estimates:st.info('🌰 Züruf için ayrı, yöntemsel belirsizliği yüksek tahmin: '+f"{sum(r['kg CO₂e/yıl'] for r in estimates):,.1f} kg CO₂e/yıl"+' (ana toplama eklenmedi).')
     if verified:
         df=pd.DataFrame(verified)
@@ -295,7 +354,7 @@ else:
         with st.expander(f'ℹ️ Henüz hesaplanamayan alanlar ({len(set(missing))})'):
             for item in dict.fromkeys(missing):st.write('• '+item)
     with st.expander('🔬 Kaynaklar ve hesaplama sınırları'):
-        st.write('Elektrik: Türkiye EVÇED 2023, 0,469 kg CO₂e/kWh. Yakıt: DESNZ 2026 doğrudan yanma referansları. Gübre: IPCC 2019 doğrudan N₂O EF₁=0,010 ve GWP100=273. Plastik: DESNZ 2025 birincil LDPE 2,96508 ve PET 3,86390 kg CO₂e/kg; örnek ağırlıklar kullanıcı tarafından değiştirilebilir. Sığır eti: Poore & Nemecek 2018 / Our World in Data küresel ortalama 99,48 kg CO₂e/kg ürün; yaşam döngüsü kapsamı yakıt faktörlerinden farklıdır. Kompost: IPCC 2006 genel 4 kg CH₄/t ve 0,24 kg N₂O/t yaş malzeme, yalnızca ayrı tahmin. Bu referanslar Eynesil ölçümü değildir. Toplu taşıma ve züruf yakma faktörleri doğrulanmış kaynakla araştırmacı tarafından girilmelidir.')
+        st.write('Elektrik: Türkiye EVÇED 2023, 0,469 kg CO₂e/kWh. Yakıt: DESNZ 2026 doğrudan yanma referansları. Gübre: IPCC 2019 doğrudan N₂O EF₁=0,010 ve GWP100=273. Plastik: DESNZ 2025 birincil LDPE 2,96508 ve PET 3,86390 kg CO₂e/kg; örnek ağırlıklar kullanıcı tarafından değiştirilebilir. Sığır eti: Poore & Nemecek 2018 / Our World in Data küresel ortalama 99,48 kg CO₂e/kg ürün; yaşam döngüsü kapsamı yakıt faktörlerinden farklıdır. Kompost: IPCC 2006 genel 4 kg CH₄/t ve 0,24 kg N₂O/t yaş malzeme, yalnızca ayrı tahmin. Bu referanslar Eynesil ölçümü değildir. Minibüs: Eynesil–Giresun 73 km ve tahmini 6,5–7,5 L/sefer; Eynesil–Trabzon 59 km ve tahmini 5–6 L/sefer; hesapta sırasıyla 7 ve 5,5 L kullanılır. Ortalama doluluk 8,5 yolcu; hat başına 6 günlük sefer. Bunlar doğrulanmamış yerel saha tahminleridir. Züruf açıkta yakma: IPCC 2019 Vol.4 Tablo 2.5, CH₄=2,7 g/kg ve N₂O=0,07 g/kg gerçekten yanan kuru kalıntı. Kuru madde/yanma oranı yerel veri gerektirir. Kendi bahçesinden üretim sıfır emisyon değildir.')
         if rows:st.dataframe(pd.DataFrame(rows),hide_index=True,use_container_width=True)
     answers={k:v for k,v in st.session_state.items() if k not in ('sid','step','submitted') and not k.startswith('FormSubmitter') and k not in ('scenario_activity','scenario_pct')}
     payload={'id':st.session_state.sid,'timestamp':datetime.now(timezone.utc).isoformat(),'answers':answers,'results':{'total_kg':round(total,3),'activities':rows,'missing':missing,'estimate_only':estimates,'model_comparison':{'reference_kg':comparison['reference'],'eynesil_extended_kg':comparison['extended'],'local_activity_contribution_kg':comparison['increment'],'comparison_type':'scope_only_not_savings'}}}
