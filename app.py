@@ -1,6 +1,6 @@
 """Eco-Algoritma V16 | Proje hipotezlerine bağlı hesaplama revizyonu.
 Run: pip install streamlit pandas gspread google-auth
-     streamlit run eco_algoritma_v15_rapor_uyumlu.py
+     streamlit run eco_algoritma.py
 Optional private Google Sheets: .streamlit/secrets.toml [connections.gsheets] spreadsheet_id = ...
 [connections.gsheets.service_account] ... Google service account JSON fields.
 Only pseudonymous responses are collected after explicit consent. No names/IP requested.
@@ -11,11 +11,145 @@ import json
 import uuid
 from datetime import datetime, timezone
 
-from eco_v12_model import minibus_range, scenario
-from eco_v14_science import biomass_emissions, comparable_minibus, modal_shift
-from eco_v16_research import integrated_scenario, boat_annual_emissions, fertilizer_n_kg, fertilizer_direct_kg_co2e, fertilizer_indirect_kg_co2e, boat_emissions, food_emissions, paired_comparison
 import pandas as pd
 import streamlit as st
+
+# Dahili hesaplama modulleri: harici eco_vXX dosyalarina bagimlilik yok.
+"""Eco-Algoritma V12: ölçülebilir senaryo ve yerel minibüs belirsizliği."""
+F_DIESEL=2.58354
+ROUTES={'Eynesil–Giresun':(73.0,6.5,7.0,7.5),'Eynesil–Trabzon':(59.0,5.0,5.5,6.0)}
+
+def minibus_range(route, weekly_trips, roundtrip=True, weeks=52):
+    if route not in ROUTES: raise ValueError('Bilinmeyen hat')
+    if weekly_trips<0: raise ValueError('Negatif sefer')
+    km, low,mid,high=ROUTES[route]
+    trips=weekly_trips*(2 if roundtrip else 1)*weeks
+    return {'km_year':km*trips,'low':trips*low/9*F_DIESEL,
+            'central':trips*mid/8.5*F_DIESEL,'high':trips*high/8*F_DIESEL}
+
+def scenario(base, changes):
+    """changes: {faaliyet: (azaltma_orani_0_1, alternatif_emisyon_kg)}.
+    Net savings include replacement-mode emissions; no claim of realized reduction.
+    """
+    if any(v<0 for v in base.values()): raise ValueError('Negatif temel emisyon')
+    original=sum(base.values()); new=dict(base)
+    for key,(reduction,alternative) in changes.items():
+        if key not in base or not 0<=reduction<=1 or alternative<0:raise ValueError('Geçersiz senaryo')
+        new[key]=base[key]*(1-reduction)+alternative
+    updated=sum(new.values());saved=original-updated
+    return {'baseline':original,'alternative':updated,'difference':saved,
+            'percent':100*saved/original if original else 0}
+
+"""Eco-Algoritma V14: IPCC biyokütle, karşılaştırma, duyarlılık ve senaryolar.
+Birimler açıkça belirtilir; fındık kabuğu için odun ısıl değeri yalnızca vekil senaryodur.
+"""
+GWP_CH4=27.2
+GWP_N2O=273.0
+# IPCC 2006 Vol 2 Chapter 2 Table 2.5 residential: wood/wood waste and other primary solid biomass
+CH4_KG_TJ=300.0
+N2O_KG_TJ=4.0
+WOOD_NCV_MJ_KG=15.6  # IPCC 2006 Vol 2 Chapter 1, air dry wood/wood waste
+WOOD_BIOGENIC_CO2_KG_TJ=112000.0
+SHELL_BIOGENIC_CO2_KG_TJ=100000.0 # Other primary solid biomass; not hazelnut-specific
+
+def biomass_emissions(kg, ncv_mj_kg=WOOD_NCV_MJ_KG, category='wood'):
+    if kg < 0 or ncv_mj_kg <= 0 or category not in ('wood','shell'):
+        raise ValueError('Geçersiz biyokütle girdisi')
+    tj=kg*ncv_mj_kg/1_000_000
+    ch4=tj*CH4_KG_TJ
+    n2o=tj*N2O_KG_TJ
+    return {'non_co2_kg_co2e':ch4*GWP_CH4+n2o*GWP_N2O,
+            'ch4_kg':ch4,'n2o_kg':n2o,
+            'biogenic_co2_kg_memo':tj*(WOOD_BIOGENIC_CO2_KG_TJ if category=='wood' else SHELL_BIOGENIC_CO2_KG_TJ),
+            'energy_tj':tj}
+
+def comparable_minibus(route, weekly_trips, standard_kg_per_passenger_km, roundtrip=True):
+    """Same passenger-km, standard published factor versus local fuel/occupancy assumptions."""
+    if standard_kg_per_passenger_km is None or standard_kg_per_passenger_km <= 0:
+        raise ValueError('Standart yolcu-km faktörü kaynaklandırılmalı')
+    local=minibus_range(route,weekly_trips,roundtrip)
+    return {'standard_kg':local['km_year']*standard_kg_per_passenger_km,
+            'local_kg':local['central'], 'difference_kg':local['central']-local['km_year']*standard_kg_per_passenger_km,
+            'passenger_km':local['km_year']}
+
+def modal_shift(car_baseline_kg, displaced_fraction, replacement_kg):
+    if not 0<=displaced_fraction<=1 or min(car_baseline_kg,replacement_kg)<0:
+        raise ValueError('Geçersiz değişken')
+    alternative=car_baseline_kg*(1-displaced_fraction)+replacement_kg
+    return {'baseline':car_baseline_kg,'alternative':alternative,
+            'difference':car_baseline_kg-alternative,
+            'percent':(car_baseline_kg-alternative)/car_baseline_kg*100 if car_baseline_kg else 0}
+
+"""V15: Proje raporuna bağlı H1/H2/H3 araştırma hesapları.
+Bilinmeyen katsayılar için sayı üretmez; farklı sistem sınırları ayrı tutulur.
+"""
+from math import isfinite
+
+def positive_or_zero(value, name):
+    if value is None or not isfinite(float(value)) or float(value) < 0:
+        raise ValueError(f'{name}: sıfır veya pozitif sonlu sayı gerekli')
+    return float(value)
+
+def fertilizer_n_kg(bags, bag_kg, nitrogen_pct):
+    for name, val in [('Torba',bags),('Torba kütlesi',bag_kg),('N oranı',nitrogen_pct)]: positive_or_zero(val,name)
+    if nitrogen_pct>100: raise ValueError('Azot oranı %100 üstünde olamaz')
+    return bags*bag_kg*nitrogen_pct/100
+
+def fertilizer_direct_kg_co2e(n_kg, ef1=0.01, gwp_n2o=273):
+    for name, val in [('Azot',n_kg),('EF1',ef1),('GWP',gwp_n2o)]:positive_or_zero(val,name)
+    return n_kg*ef1*(44/28)*gwp_n2o
+
+def fertilizer_indirect_kg_co2e(n_kg, frac_gas, ef4, frac_leach, ef5, gwp_n2o=273):
+    """IPCC 2019 genel akış şeması; parametreler kaynaklandırılmadan hesaplanmaz."""
+    for name,val in [('Azot',n_kg),('FracGASF',frac_gas),('EF4',ef4),('FracLEACH',frac_leach),('EF5',ef5),('GWP',gwp_n2o)]:positive_or_zero(val,name)
+    if frac_gas>1 or frac_leach>1:raise ValueError('Fraksiyon 0-1 aralığında olmalı')
+    return n_kg*(frac_gas*ef4+frac_leach*ef5)*(44/28)*gwp_n2o
+
+def boat_emissions(weekly_liters, kg_per_liter, allocation='tam', people=None):
+    """Teknenin tüm yakıtı veya kişi payı; ikisi birlikte asla toplanmaz."""
+    positive_or_zero(weekly_liters,'Haftalık litre');positive_or_zero(kg_per_liter,'Faktör')
+    annual=weekly_liters*52*kg_per_liter
+    if allocation=='tam':return annual
+    if allocation=='kisi':
+        if people is None or people<1 or int(people)!=people:raise ValueError('Geçerli kişi sayısı gerekli')
+        return annual/people
+    raise ValueError('Tahsis yöntemi bilinmiyor')
+
+def food_emissions(weekly_kg, factor=None, source=None):
+    positive_or_zero(weekly_kg,'Haftalık gıda miktarı')
+    if factor is None or not source or not str(source).strip():return None
+    positive_or_zero(factor,'Gıda faktörü')
+    return weekly_kg*52*factor
+
+def paired_comparison(standard, local):
+    """Aynı birim ve aynı faaliyet sınırı sağlanmış iki yıllık değer."""
+    positive_or_zero(standard,'Standart');positive_or_zero(local,'Yerel')
+    return {'standard':standard,'local':local,'difference':local-standard,'difference_pct':(local-standard)/standard*100 if standard else None}
+
+
+def boat_annual_emissions(weekly_liters, active_weeks, kg_per_liter, allocation='tam', people=None):
+    """Aktif haftalar üzerinden yıllık tekne yakıtı; 52 hafta varsayılmaz."""
+    positive_or_zero(weekly_liters,'Aktif haftalık yakıt')
+    positive_or_zero(active_weeks,'Aktif hafta')
+    positive_or_zero(kg_per_liter,'Yakıt faktörü')
+    if active_weeks > 52:raise ValueError('Yıllık aktif hafta 52 üstünde olamaz')
+    total=weekly_liters*active_weeks*kg_per_liter
+    if allocation=='tam':return total
+    if allocation=='kisi':
+        if people is None or people<1 or int(people)!=people:raise ValueError('Kişi sayısı geçersiz')
+        return total/people
+    raise ValueError('Paylaştırma yöntemi geçersiz')
+
+def integrated_scenario(base, electric_fraction=0, car_fraction=0, replacement_kg=0):
+    """Tek seferlik elektrik/araç azaltımı ve varsa yeni toplu taşıma emisyonu."""
+    for name,v in base.items():positive_or_zero(v,name)
+    for name,f in [('Elektrik azaltımı',electric_fraction),('Araç azaltımı',car_fraction)]:
+        positive_or_zero(f,name)
+        if f>1:raise ValueError('Azaltım 0-1 arasında olmalı')
+    positive_or_zero(replacement_kg,'Yeni ulaşım emisyonu')
+    baseline=sum(base.values())
+    alternative=baseline-base.get('Elektrik',0)*electric_fraction-base.get('Özel araç',0)*car_fraction+replacement_kg
+    return {'baseline':baseline,'alternative':alternative,'difference':baseline-alternative,'percent':100*(baseline-alternative)/baseline if baseline else 0}
 
 st.set_page_config(page_title="Eynesil Karbon Rehberim", page_icon="🌿", layout="centered", initial_sidebar_state="collapsed")
 st.markdown("""<style>
