@@ -1,6 +1,6 @@
-"""Eco-Algoritma V11 | Orijinal Eynesil anketiyle ulaşım uyumu.
+"""Eco-Algoritma V16 | Proje hipotezlerine bağlı hesaplama revizyonu.
 Run: pip install streamlit pandas gspread google-auth
-     streamlit run eco_algoritma_v10_anket_uyumlu.py
+     streamlit run eco_algoritma_v15_rapor_uyumlu.py
 Optional private Google Sheets: .streamlit/secrets.toml [connections.gsheets] spreadsheet_id = ...
 [connections.gsheets.service_account] ... Google service account JSON fields.
 Only pseudonymous responses are collected after explicit consent. No names/IP requested.
@@ -11,6 +11,9 @@ import json
 import uuid
 from datetime import datetime, timezone
 
+from eco_v12_model import minibus_range, scenario
+from eco_v14_science import biomass_emissions, comparable_minibus, modal_shift
+from eco_v16_research import integrated_scenario, boat_annual_emissions, fertilizer_n_kg, fertilizer_direct_kg_co2e, fertilizer_indirect_kg_co2e, boat_emissions, food_emissions, paired_comparison
 import pandas as pd
 import streamlit as st
 
@@ -76,14 +79,29 @@ def calculate():
             annual_elec=(winter*months+summer*(12-months)) if winter is not None and summer is not None else None
         else: annual_elec=annualize(v.get('electric'),'ay')
         add('Elektrik','Enerji',annual_elec,F['elektrik'])
-    if v.get('heat')=='Doğalgaz':
+    if 'Doğalgaz' in v.get('heating_sources', []):
         if v.get('gas_mode')=='Mevsime göre ayrı':
             winter=v.get('gas_winter');summer=v.get('gas_other');months=v.get('winter_months',4)
             annual_gas=(winter*months+summer*(12-months)) if winter is not None and summer is not None else None
         else: annual_gas=annualize(v.get('gas'),'ay')
         add('Doğalgaz','Enerji',annual_gas,F['gaz'])
-    elif v.get('heat')=='Kömür':add('Kömür','Enerji',v.get('coal'),F['komur'])
-    elif v.get('heat') in ('Odun / fındık kabuğu','Diğer / bilmiyorum'):missing.append('Isınma kaynaklı diğer emisyonlar')
+    if 'Kömür' in v.get('heating_sources', []):add('Kömür','Enerji',v.get('coal'),F['komur'])
+    if 'Odun' in v.get('heating_sources', []):
+        amount=v.get('wood_kg')
+        if amount is None:missing.append('Odun miktarı (kg)')
+        else:
+            bio=biomass_emissions(amount,category='wood')
+            rows.append({'Faaliyet':'Odun yakımı CH₄+N₂O (biyojenik CO₂ hariç)','Modül':'Enerji','kg CO₂e/yıl':round(bio['non_co2_kg_co2e'],3)})
+            rows.append({'Faaliyet':'Odun biyojenik CO₂ (bilgi amaçlı, toplam dışı)','Modül':'Biyojenik CO₂ (ayrı)','kg CO₂e/yıl':round(bio['biogenic_co2_kg_memo'],3)})
+    if 'Fındık kabuğu' in v.get('heating_sources', []):
+        amount=v.get('shell_kg'); ncv=v.get('shell_ncv',15.6)
+        if amount is None:missing.append('Fındık kabuğu miktarı (kg)')
+        else:
+            bio=biomass_emissions(amount,ncv_mj_kg=ncv,category='shell')
+            rows.append({'Faaliyet':'Fındık kabuğu CH₄+N₂O (genel biyokütle vekil)','Modül':'Enerji','kg CO₂e/yıl':round(bio['non_co2_kg_co2e'],3)})
+            rows.append({'Faaliyet':'Fındık kabuğu biyojenik CO₂ (bilgi amaçlı)','Modül':'Biyojenik CO₂ (ayrı)','kg CO₂e/yıl':round(bio['biogenic_co2_kg_memo'],3)})
+            missing.append('Fındık kabuğu için yerel alt ısıl değer ve soba emisyon ölçümü yapılmadı; odun NCV vekil kullanıldı')
+    if 'Diğer / bilmiyorum' in v.get('heating_sources', []):missing.append('Diğer ısınma yakıtı: uygun faktör eksik')
     if v.get('car')=='Evet':
         fuel=v.get('fuel')
         if fuel in ('Benzin','Dizel','LPG'):
@@ -96,13 +114,20 @@ def calculate():
     # commute_mode is survey metadata; its trips are included in car_km / bus_trips_week.
     if v.get('farm')=='Evet' and v.get('fert')=='Evet':
         b=v.get('bags');m=v.get('bag_weight');p=v.get('n_percent')
-        nitrogen=b*m*p/100 if all(x is not None for x in (b,m,p)) else None
+        nitrogen=fertilizer_n_kg(b,m,p) if all(x is not None for x in (b,m,p)) else None
         add('Gübre: doğrudan N₂O','Tarım',nitrogen,0.010*(44/28)*273)
-        missing.append('Gübrenin dolaylı N₂O ve üretim emisyonları')
+        missing.append('Gübrenin dolaylı N₂O ve üretim emisyonları (kaynaklandırılmış parametre gerektirir)')
     # Züruf yakılmıyorsa açıkta yakma emisyonu hesaplanmaz; diğer işlemler ayrı kapsamdır.
     if v.get('boat')=='Evet':
         fuel=v.get('boat_fuel')
-        if fuel in ('Benzin','Dizel'):add('Balıkçı teknesi','Yerel faaliyet',annualize(v.get('boat_liters'),'hafta'),F[fuel])
+        if fuel in ('Benzin','Dizel'):
+            liters=v.get('boat_liters')
+            if liters is None:missing.append('Balıkçı teknesi yakıt miktarı')
+            else:
+                allocation='kisi' if v.get('boat_allocation')=='Kişi başına eşit pay' else 'tam'
+                crew=v.get('boat_people') if allocation=='kisi' else None
+                if allocation=='kisi' and crew is None:missing.append('Tekne kişi payı için kişi sayısı')
+                else:rows.append({'Faaliyet':'Balıkçı teknesi' + (' (kişi payı)' if allocation=='kisi' else ' (tam yakıt)'),'Modül':'Yerel faaliyet','kg CO₂e/yıl':round(boat_annual_emissions(liters,v.get('boat_active_weeks'),F[fuel],allocation,crew),3)}) if v.get('boat_active_weeks') is not None else missing.append('Balıkçılıkta yıllık aktif hafta sayısı')
         else:missing.append('Tekne yakıtı')
     if v.get('plastic')=='Evet':
         for label,count_key,weight_key,ef in [('Poşet malzemesi','bags_week','bag_g',F['LDPE']),('PET şişe gövdesi','bottles_week','bottle_g',F['PET'])]:
@@ -124,7 +149,9 @@ def calculate():
     if v.get('food')=='Evet':
         meat=v.get('beef_kg')
         add('Sığır eti (küresel yaşam döngüsü ortalaması)','Beslenme',annualize(meat,'hafta'),F['beef'])
-        missing.append('Diğer gıda türleri (yalnızca sığır eti hesaplandı)')
+        missing.append('Diğer gıda türleri: doğrulanmış yaşam döngüsü faktörü olmadan toplam dışı')
+        for food_key,food_label in [('chicken_kg','Tavuk eti'),('fish_kg','Balık'),('dairy_kg','Süt ürünleri')]:
+            if v.get(food_key) is not None:missing.append(food_label+' miktarı kaydedildi; kaynaklı faktör tanımlanmadığı için hesaplanmadı')
     if v.get('farm')=='Evet' and v.get('zuruf')=='Kompost yapıyorum':
         z=v.get('zuruf_ton')
         if z is not None:
@@ -177,14 +204,19 @@ def compare_models(rows):
             'local_rows': local_rows}
 
 def send_sheet(payload):
-    """Optional private sheet storage; no success claims without an actual append."""
+    """Tek katılımcı oturum ID'si için tek satır: tekrar gönderimde güncelle."""
     try:
         cfg=st.secrets['connections']['gsheets']
         import gspread
         from google.oauth2.service_account import Credentials
         creds=Credentials.from_service_account_info(dict(cfg['service_account']),scopes=['https://www.googleapis.com/auth/spreadsheets'])
         ws=gspread.authorize(creds).open_by_key(cfg['spreadsheet_id']).worksheet('Yanitlar')
-        ws.append_row([payload['id'],payload['timestamp'],json.dumps(payload['answers'],ensure_ascii=False),json.dumps(payload['results'],ensure_ascii=False)],value_input_option='RAW')
+        values=[payload['id'],payload['timestamp'],json.dumps(payload['answers'],ensure_ascii=False,default=str),json.dumps(payload['results'],ensure_ascii=False,default=str)]
+        cell=ws.find(payload['id'],in_column=1)
+        if cell:
+            ws.update(range_name=f'A{cell.row}:D{cell.row}',values=[values],value_input_option='RAW')
+        else:
+            ws.append_row(values,value_input_option='RAW')
         return True,None
     except Exception as e:return False,str(e)
 
@@ -217,8 +249,8 @@ elif s==1:
             num('elec_winter','Kış aylarında ayda kaç kWh?',10)
             num('elec_other','Diğer aylarda ayda kaç kWh?',10)
         else:num('electric','Ayda yaklaşık kaç kWh elektrik tüketiyorsunuz?',10)
-    select('heat','Eviniz genellikle nasıl ısınıyor?',['Doğalgaz','Kömür','Elektrik','Odun / fındık kabuğu','Diğer / bilmiyorum','Isınma yok'])
-    if st.session_state.heat=='Doğalgaz':
+    st.multiselect('Evinizde kullanılan ısınma kaynakları (birden fazla seçebilirsiniz)', ['Doğalgaz','Kömür','Elektrik','Odun','Fındık kabuğu','Diğer / bilmiyorum'],key='heating_sources',help='Elektrikle ısınma evin toplam kWh tüketiminde ise ikinci kez eklenmez.')
+    if 'Doğalgaz' in st.session_state.heating_sources:
         select('gas_mode','Doğalgaz tüketiminizi nasıl biliyorsunuz?', ['Aylık ortalama','Mevsime göre ayrı'])
         if st.session_state.gas_mode=='Mevsime göre ayrı':
             num('gas_winter','Kış aylarında ayda kaç m³ doğalgaz?',10)
@@ -226,8 +258,15 @@ elif s==1:
         else:
             num('gas','Yılın 12 ayına göre ortalama aylık kaç m³ doğalgaz?',10)
             st.caption('Yalnızca kış faturasındaki tüketimi biliyorsanız mevsime göre ayrı seçeneğini kullanın.')
-    if st.session_state.heat=='Kömür':num('coal','Bir kışta yaklaşık kaç kg kömür kullanıyorsunuz?',25)
-    if st.session_state.heat=='Elektrik':st.caption('Elektrikli ısıtma evin toplam elektrik tüketimine dâhilse yeniden sayılmayacaktır.')
+    if 'Kömür' in st.session_state.heating_sources:num('coal','Bir kışta yaklaşık kaç kg kömür kullanıyorsunuz?',25)
+    if 'Odun' in st.session_state.heating_sources:num('wood_kg','Bir kışta yaklaşık kaç kg odun kullanıyorsunuz?',25)
+    if 'Fındık kabuğu' in st.session_state.heating_sources:
+        num('shell_kg','Bir kışta yaklaşık kaç kg fındık kabuğu yakıyorsunuz?',25)
+        with st.expander('🔬 Fındık kabuğu alt ısıl değeri (araştırmacı)'):
+            st.number_input('Alt ısıl değer (MJ/kg)',min_value=1.0,max_value=35.0,value=15.6,step=0.1,key='shell_ncv')
+            st.caption('15,6 MJ/kg, IPCC odun/odun atığı varsayımıdır; fındık kabuğu için ölçülmüş değer DEĞİLDİR. Yerel laboratuvar değeri elde edilirse değiştirin.')
+    if 'Elektrik' in st.session_state.heating_sources:st.caption('Elektrikli ısıtma evin toplam elektrik tüketimine dâhilse yeniden sayılmayacaktır.')
+    if any(x in st.session_state.heating_sources for x in ('Odun','Fındık kabuğu')):st.info('IPCC 2006 konut biyokütle yakma CH₄/N₂O genel faktörleri kullanılır. Biyojenik CO₂ ayrı raporlanır. Fındık kabuğu alt ısıl değeri odun vekilidir; ölçülmüş yerel katsayı değildir.')
 elif s==2:
     st.subheader('🚗 Günlük ulaşım')
     st.caption('Orijinal anketin 7–10. soruları korunmuştur. İş/okul ulaşımı haftalık toplam mesafeye dahildir; ikinci kez eklenmez.')
@@ -297,7 +336,13 @@ elif s==3:
     select('boat','Balıkçı teknesinin yakıtını siz mi karşılıyorsunuz?',['Hayır','Evet'])
     if st.session_state.boat=='Evet':
         select('boat_fuel','Teknenin yakıtı nedir?',['Dizel','Benzin','Bilmiyorum'])
-        if st.session_state.boat_fuel!='Bilmiyorum':num('boat_liters','Haftada ortalama kaç litre yakıt kullanılıyor?',5)
+        if st.session_state.boat_fuel!='Bilmiyorum':
+            num('boat_liters','Aktif olduğunuz bir haftada ortalama kaç litre tekne yakıtı kullanılıyor?',5)
+            st.number_input('Yılda kaç hafta balıkçılık yapılıyor?',min_value=0,max_value=52,value=None,step=1,key='boat_active_weeks',help='Mevsimlik faaliyetler için 52 hafta varsayılmaz; gerçekten aktif olunan hafta sayısını girin.')
+            select('boat_allocation','Tekne yakıtını nasıl raporlayalım?',['Teknenin tüm yakıtı','Kişi başına eşit pay'])
+            if st.session_state.boat_allocation=='Kişi başına eşit pay':
+                st.caption('Eşit paylaştırma yalnızca açık bir tahsis varsayımıdır; kişi sayısını belirtin.')
+                num('boat_people','Teknedeki paylaştırılacak kişi sayısı',1)
 elif s==4:
     st.subheader('♻️ Günlük alışkanlıklar')
     select('survey_recycling','6. Kâğıt, cam ve plastikleri geri dönüşüm kutusuna atıyor musunuz?',['Evet','Hayır','Bazen'])
@@ -330,13 +375,22 @@ elif s==4:
     if st.session_state.food=='Evet':
         st.caption('Sığır eti için haftalık yaklaşık miktar yeterli. Diğer etleri aynı faktörle hesaplamıyoruz.')
         num('beef_kg','Haftada yaklaşık kaç kg sığır eti tüketiyorsunuz?',0.1)
+        with st.expander('Diğer gıda tüketimi (H2: yalnızca faaliyet verisi)'):
+            st.caption('Doğrulanmış ürün bazlı yaşam döngüsü faktörü olmadan bu girdilerden emisyon hesaplanmaz.')
+            num('chicken_kg','Haftada kaç kg tavuk eti?',0.1)
+            num('fish_kg','Haftada kaç kg balık?',0.1)
+            num('dairy_kg','Haftada kaç kg süt ürünü?',0.1)
     st.caption('Kendi bahçesinden üretim ve pazar/market tercihi, tek başına indirim katsayısı değildir. Gıda üretim miktarı ve ulaşım verisi olmadan hayalî tasarruf hesaplanmaz.')
 else:
     st.subheader('🌱 Karbon özetiniz')
-    rows,missing=calculate();verified=[r for r in rows if r['Modül'] not in ('Züruf (tahmini)','Yayla (senaryo)')];estimates=[r for r in rows if '(tahmini)' in r['Modül']];total=sum(r['kg CO₂e/yıl'] for r in verified)
+    rows,missing=calculate();verified=[r for r in rows if r['Modül'] not in ('Züruf (tahmini)','Yayla (senaryo)','Biyojenik CO₂ (ayrı)')];estimates=[r for r in rows if '(tahmini)' in r['Modül']];total=sum(r['kg CO₂e/yıl'] for r in verified)
     comparison=compare_models(rows)
     st.metric('Hesaplanabilen yıllık emisyon',f'{total:,.0f} kg CO₂e')
     st.caption('Bu bir **kısmi, varsayımlara dayalı emisyon tahminidir**; hesaplanamayan faaliyetler sıfır sayılmaz. Farklı yaşam döngüsü sınırları içeren bileşenler ayrı yorumlanmalıdır.')
+    st.markdown('### 🔬 Emisyon faktörü duyarlılığı (H1–H2 için belirsizlik değerlendirmesi)')
+    st.caption('Bu analiz, yalnızca hesaplanan elektrik ve yakıt emisyon faktörlerini varsayımsal ±%10 değiştirir; güven aralığı değildir ve yerel katsayı üretmez.')
+    sensitive=sum(r['kg CO₂e/yıl'] for r in verified if r['Faaliyet'] in ('Elektrik','Doğalgaz','Kömür','Özel araç','Balıkçı teknesi') or r['Faaliyet'].startswith(('Odun yakımı','Fındık kabuğu CH₄')))
+    st.write(f'İlgili faaliyetlerin referans toplamı: **{sensitive:,.1f} kg CO₂e/yıl** · Alt senaryo: **{sensitive*0.9:,.1f}** · Üst senaryo: **{sensitive*1.1:,.1f}**')
     if st.session_state.get('doa_use')=='Evet':
         d=doa_scenario(st.session_state.get('doa_pet_month',0),st.session_state.get('doa_glass_month',0),st.session_state.get('doa_pet_g',20.0),st.session_state.get('doa_glass_g',250.0))
         saving=sum(item['potential_kg_co2e'] for item in d.values())
@@ -344,7 +398,55 @@ else:
         st.metric('Olası yıllık geri dönüşüm avantajı',f'{saving:,.2f} kg CO₂e/yıl')
         st.caption(f"Yıllık PET: {d['PET']['annual_kg']:.2f} kg · Cam: {d['Cam']['annual_kg']:.2f} kg. Son bir ayın 12 ay boyunca temsilî olduğu varsayılmıştır.")
         st.info('Bu bir **ABD EPA WARM karşılaştırma senaryosudur**, DOA sisteminin doğrulanmış net karbon tasarrufu değildir. Ambalajların fiilen geri dönüştürülmesi, nakliye ve Türkiye enerji karması sonucu değiştirebilir. Ana karbon toplamından çıkarılmamıştır.')
-    st.markdown('### 🌍 Genel referans ve 🌰 Eynesil kapsamı')
+    st.markdown('### 🎯 H3: Birleşik enerji ve ulaşım senaryosu')
+    st.caption('Elektrik azaltımı ve özel araçtan minibüse geçiş tek hesapta değerlendirilir. Özel araçtan azaltılan mesafe ikinci kez azaltılmaz; yeni minibüs emisyonu eklenir. Gerçekleşmiş tasarruf değildir.')
+    base_by_name={r['Faaliyet']:r['kg CO₂e/yıl'] for r in verified}
+    electric_pct=st.slider('Elektrik tüketimini azaltma (%)',0,50,10,5,key='v16_electric_pct')
+    car_pct=st.slider('Özel araç kilometresini azaltma / minibüse aktarma (%)',0,50,10,5,key='v16_car_pct')
+    has_car='Özel araç' in base_by_name
+    replacement=0.0
+    shift_mode='Yolculuk yapılmayacak (talep azaltımı)'
+    if has_car:
+        shift_mode=st.selectbox('Azaltılan özel araç mesafesi nasıl karşılanacak?', ['Yolculuk yapılmayacak (talep azaltımı)','Minibüse geçilecek'],key='v16_shift_mode')
+        if shift_mode=='Minibüse geçilecek':
+            if st.session_state.get('car_input')=='Haftalık yol (km)' and st.session_state.get('car_km') is not None and st.session_state.get('bus_route') in ROUTES:
+                r=ROUTES[st.session_state['bus_route']]
+                km_shift=st.session_state['car_km']*52*car_pct/100
+                replacement=km_shift*r['liters_trip']/r['km']/LOCAL['minibus_passengers_mean']*F['Dizel']
+                st.caption(f'İkame mesafesi: {km_shift:,.1f} km/yıl; yeni minibüs emisyonu: {replacement:,.1f} kg CO₂e/yıl. Aynı mesafe ve ortalama 8,5 yolcu varsayılmıştır.')
+            else:
+                st.warning('Minibüse geçiş için özel araç haftalık km ve Eynesil minibüs güzergâhı gerekli. Bu bilgiler olmadan net senaryo hesaplanmaz.')
+    valid_shift=(shift_mode!='Minibüse geçilecek' or (st.session_state.get('car_input')=='Haftalık yol (km)' and st.session_state.get('car_km') is not None and st.session_state.get('bus_route') in ROUTES))
+    if valid_shift and ('Elektrik' in base_by_name or has_car):
+        outcome=integrated_scenario(base_by_name,electric_pct/100 if 'Elektrik' in base_by_name else 0,car_pct/100 if has_car else 0,replacement)
+        a,b,c=st.columns(3)
+        a.metric('Mevcut',f"{outcome['baseline']:,.0f} kg")
+        b.metric('Alternatif',f"{outcome['alternative']:,.0f} kg")
+        c.metric('Net azalma',f"{outcome['difference']:,.0f} kg")
+        st.caption(f"Yıllık net değişim: %{outcome['percent']:.1f}. Bu değer yalnızca hesaplanan faaliyetler için geçerlidir.")
+    elif valid_shift:st.info('Elektrik veya özel araç tüketimi hesaplandığında senaryo gösterilir.')
+    if st.session_state.get('bus')=='Evet' and st.session_state.get('bus_route') in ROUTES and st.session_state.get('bus_trips_week') is not None:
+        st.markdown('### 🔬 Minibüs duyarlılık analizi (araştırma hedefi 7)')
+        r=minibus_range(st.session_state['bus_route'],st.session_state['bus_trips_week'],st.session_state.get('bus_trip_type','Gidiş-dönüş')=='Gidiş-dönüş')
+        st.dataframe(pd.DataFrame([{'Varsayım':'Düşük tüketim / 9 yolcu','kg CO₂e/yıl':round(r['low'],2)},
+                                   {'Varsayım':'Orta tüketim / 8,5 yolcu','kg CO₂e/yıl':round(r['central'],2)},
+                                   {'Varsayım':'Yüksek tüketim / 8 yolcu','kg CO₂e/yıl':round(r['high'],2)}]),hide_index=True,use_container_width=True)
+        st.caption('Bu aralık, verilen saha tahminleriyle yapılan senaryo duyarlılığıdır; istatistiksel güven aralığı veya ölçüm doğrulaması değildir.')
+    st.markdown('### 🔬 H1: Aynı ulaşım faaliyeti için standart–yerel karşılaştırma')
+    st.caption('Aynı yolcu-km üzerinden iki yöntem karşılaştırılır. Standart yolcu-km katsayısı belgelenmeden H1 için sayısal sonuç oluşturulmaz.')
+    if st.session_state.get('bus')=='Evet' and st.session_state.get('bus_route') in ROUTES:
+        with st.expander('Araştırmacı: kaynaklandırılmış standart minibüs faktörü'):
+            standard_factor=st.number_input('Standart minibüs faktörü (kg CO₂e/yolcu-km)',min_value=0.0,value=0.0,step=0.001,format='%.3f',key='standard_bus_factor')
+            st.caption('0,000 = doğrulanmış standart faktör henüz tanımlanmadı. Faktörün yayın/yıl/araç sınıfını araştırma notlarına ekleyin.')
+            st.text_input('Standart faktör kaynağı ve yılı',key='standard_bus_source')
+        if standard_factor>0 and st.session_state.get('standard_bus_source','').strip():
+            h1=comparable_minibus(st.session_state['bus_route'],st.session_state.get('bus_trips_week',0),standard_factor,st.session_state.get('bus_trip_type')=='Gidiş-dönüş')
+            st.dataframe(pd.DataFrame([{'Yöntem':'Standart faktör','kg CO₂e/yıl':round(h1['standard_kg'],2)},{'Yöntem':'Yerel yakıt/doluluk varsayımı','kg CO₂e/yıl':round(h1['local_kg'],2)}]),hide_index=True,use_container_width=True)
+            st.caption(f"H1 farkı (yerel - standart): {h1['difference_kg']:+.2f} kg CO₂e/yıl. Bu karşılaştırma tek bir ulaşım bileşenine aittir, H1'i istatistiksel olarak kanıtlamaz.")
+        else:st.info('H1 için standart minibüs faktörü ve kaynağı girilmedi; karşılaştırma üretilmedi.')
+    st.markdown('### 🧪 H2: Yerel faaliyet kapsamı ve veri sınırları')
+    st.caption('Fındık/çay gübresinin doğrudan N₂O emisyonu, tekne yakıtı ve ısınma faaliyetleri H2 için hesaplanabilir bileşenlerdir. Fındık zürufu, diğer gıdalar ve dolaylı gübre emisyonları gerekli kaynak/ölçüm olmadan sıfır sayılmaz. H2, ikinci veri setinde dağılımlar incelenmeden doğrulanmış kabul edilmez.')
+    st.markdown('### 🌍 Kapsam karşılaştırması (yerel katsayı etkisi değildir)')
     left,right=st.columns(2)
     with left: st.metric('Genel kapsam',f"{comparison['reference']:,.0f} kg CO₂e/yıl")
     with right: st.metric('Eynesil genişletilmiş kapsam',f"{comparison['extended']:,.0f} kg CO₂e/yıl")
@@ -385,7 +487,8 @@ else:
                 'Doğalgaz':'Isıtma ayarlarını ve yalıtımı gözden geçirmek tüketimi azaltabilir.',
                 'Kömür':'Isı kayıplarını azaltmak kömür tüketimini düşürebilir.',
                 'Özel araç':'Uygunsa yürüyüş, ortak araç veya toplu taşıma tercih edebilirsiniz.',
-                'Balıkçı teknesi':'Motor bakımı ve verimli seyir planlaması yakıt tüketimini azaltabilir.',
+                'Balıkçı teknesi (tam yakıt)':'Motor bakımı ve verimli seyir planlaması yakıt tüketimini azaltabilir.',
+                'Balıkçı teknesi (kişi payı)':'Motor bakımı ve verimli seyir planlaması yakıt tüketimini azaltabilir.',
                 'Gübre: doğrudan N₂O':'Toprak analizi ve uygun gübreleme planı için tarım uzmanına danışabilirsiniz.'}
         st.success('💡 Size özel öneri: '+advice.get(biggest['Faaliyet'],'Tüketim miktarlarını gözden geçirebilirsiniz.'))
         eligible=[r for r in verified if r['Faaliyet'] in ('Elektrik','Doğalgaz','Kömür','Özel araç','Balıkçı teknesi')]
@@ -403,17 +506,24 @@ else:
             for item in dict.fromkeys(missing):st.write('• '+item)
     with st.expander('🔬 Kaynaklar ve hesaplama sınırları'):
         st.write('DOA iade senaryosu: EPA WARM v16 (Aralık 2023), PET geri dönüşüm -1,04 ve düzenli depolama +0,02; cam geri dönüşüm -0,28 ve düzenli depolama +0,02 MT CO₂e/ABD short ton. 1 short ton=907,18474 kg. ABD referansı; Türkiye için ölçülmüş sonuç değil. https://www.epa.gov/system/files/documents/2023-12/warm_containers_packaging_and_non-durable_goods_materials_v16_dec.pdf ; https://www.epa.gov/system/files/documents/2024-01/warm_management_practices_v16_dec.pdf')
+        st.write('Odun ve fındık kabuğu: IPCC 2006 Vol.2 Ch.2 Table 2.5 konut yakımı; CH₄ 300 kg/TJ, N₂O 4 kg/TJ; odun alt ısıl değer 15,6 MJ/kg. Fındık kabuğunda odun alt ısıl değeri yalnızca vekil varsayımdır. Biyojenik CO₂ ana toplam dışında ayrı gösterilir. https://www.ipcc-nggip.iges.or.jp/public/2006gl/pdf/2_Volume2/V2_2_Ch2_Stationary_Combustion.pdf')
+        st.write('V16 H2: Gübre azot girdisi torba × kg/torba × N oranı ile hesaplanır; doğrudan N₂O için IPCC 2019 yaklaşımı korunur. Dolaylı N₂O parametreleri doğrulanmadan hesaplanmaz. Balıkçı teknesi yakıtı ya tam tekne toplamı ya da açıkça belirtilen kişi payıdır, ikisi birlikte toplanmaz. Diğer gıdalar için ürün bazlı doğrulanmış faktör olmadan emisyon yazılmaz.')
         st.write('Elektrik: Türkiye EVÇED 2023, 0,469 kg CO₂e/kWh. Yakıt: DESNZ 2026 doğrudan yanma referansları. Gübre: IPCC 2019 doğrudan N₂O EF₁=0,010 ve GWP100=273. Plastik: DESNZ 2025 birincil LDPE 2,96508 ve PET 3,86390 kg CO₂e/kg; örnek ağırlıklar kullanıcı tarafından değiştirilebilir. Sığır eti: Poore & Nemecek 2018 / Our World in Data küresel ortalama 99,48 kg CO₂e/kg ürün; yaşam döngüsü kapsamı yakıt faktörlerinden farklıdır. Kompost: IPCC 2006 genel 4 kg CH₄/t ve 0,24 kg N₂O/t yaş malzeme, yalnızca ayrı tahmin. Bu referanslar Eynesil ölçümü değildir. Minibüs: Eynesil–Giresun 73 km ve tahmini 6,5–7,5 L/sefer; Eynesil–Trabzon 59 km ve tahmini 5–6 L/sefer; hesapta sırasıyla 7 ve 5,5 L kullanılır. Ortalama doluluk 8,5 yolcu; hat başına 6 günlük sefer. Bunlar doğrulanmamış yerel saha tahminleridir. Züruf açıkta yakma: IPCC 2019 Vol.4 Tablo 2.5, CH₄=2,7 g/kg ve N₂O=0,07 g/kg gerçekten yanan kuru kalıntı. Kuru madde/yanma oranı yerel veri gerektirir. Kendi bahçesinden üretim sıfır emisyon değildir.')
         if rows:st.dataframe(pd.DataFrame(rows),hide_index=True,use_container_width=True)
-    answers={k:v for k,v in st.session_state.items() if k not in ('sid','step','submitted') and not k.startswith('FormSubmitter') and k not in ('scenario_activity','scenario_pct')}
+    answers={k:v for k,v in st.session_state.items() if k not in ('sid','step','submitted') and not k.startswith('FormSubmitter') and k not in ('scenario_activity','scenario_pct','last_saved_fingerprint')}
     payload={'id':st.session_state.sid,'timestamp':datetime.now(timezone.utc).isoformat(),'answers':answers,'results':{'total_kg':round(total,3),'activities':rows,'missing':missing,'estimate_only':estimates,'model_comparison':{'reference_kg':comparison['reference'],'eynesil_extended_kg':comparison['extended'],'local_activity_contribution_kg':comparison['increment'],'comparison_type':'scope_only_not_savings'}}}
     st.download_button('📥 Yanıtlarımı indir (JSON)',data=json.dumps(payload,ensure_ascii=False,indent=2,default=str),file_name='karbon_yanitim.json',mime='application/json',use_container_width=True)
+    fingerprint=json.dumps({'answers':answers,'results':payload['results']},ensure_ascii=False,sort_keys=True,default=str)
     if st.session_state.get('consent'):
-        if st.session_state.submitted:st.success('Yanıtınız araştırma tablosuna kaydedildi.')
-        elif st.button('📤 Anonim yanıtımı araştırmaya gönder',type='primary',use_container_width=True):
+        unchanged=st.session_state.last_saved_fingerprint==fingerprint
+        if unchanged:st.success('Bu yanıt sürümü araştırma tablosuna kaydedildi.')
+        elif st.button('📤 Anonim yanıtımı araştırmaya gönder / güncelle',type='primary',use_container_width=True):
             ok,err=send_sheet(payload)
-            if ok:st.session_state.submitted=True;st.rerun()
-            else:st.error('Kayıt yapılamadı. Araştırmacı Google Sheets bağlantısını henüz kurmamış olabilir. Yanıtlarınızı indirebilirsiniz.')
+            if ok:
+                st.session_state.last_saved_fingerprint=fingerprint
+                st.session_state.submitted=True
+                st.rerun()
+            else:st.error('Kayıt yapılamadı. Araştırmacı Google Sheets bağlantısını kontrol etmelidir. Yanıtlarınızı indirebilirsiniz.')
     else:st.caption('Araştırma izni verilmediğinden yanıtlarınız sunucuya gönderilmez.')
 
 st.divider()
