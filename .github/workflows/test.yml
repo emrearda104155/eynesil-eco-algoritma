@@ -1,0 +1,26 @@
+
+name: Eco-Algoritma Matematiksel Testler
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Kodlari indir
+        uses: actions/checkout@v4
+
+      - name: Python kurulumu
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Kutuphaneleri yukle
+        run: pip install -r requirements.txt
+
+      - name: Matematiksel testleri calistir
+        run: python -m unittest test_eco.py -v
